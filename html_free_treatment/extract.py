@@ -2,29 +2,35 @@ import re
 import json
 import html
 
-TABLE_NAME = "treatment"
-EXPECTED_COLUMNS = [
-    "id",
-    "title",
-    "description",
-    "description_web",
-    "description_api",
-    "disease_id",
-    "indexing",
-]
+SQL_FILE_PATH = "/Users/mahadi/Desktop/html_free_treatment/source_sql.sql"
+OUTPUT_JSON_PATH = "/Users/mahadi/Desktop/html_free_treatment/extracted_raw_data.json"
 
-def clean_text(text):
-    if not isinstance(text, str):
-        return ""
+TABLE_SCHEMAS = {
+    "treatment": [
+        "id",
+        "title",
+        "description",
+        "description_web",
+        "description_api",
+        "disease_id",
+        "indexing",
+    ],
+    "diseases": [
+        "id",
+        "name",
+        "image",
+        "category_of_disease_id",
+        "is_paid",
+        "serial",
+    ],
+    "category_of_disease": [
+        "id",
+        "name",
+        "serial",
+        "image",
+    ],
+}
 
-    text = html.unescape(text)
-    text = re.sub(r"(?is)<(script|style|xml)[^>]*>.*?</\1>", " ", text)
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</p>|</div>|</tr>|</li>|</h[1-6]>", "\n", text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = text.replace("\r", " ").replace("\n", " ")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
 
 def parse_sql_value(token):
     token = token.strip()
@@ -52,7 +58,14 @@ def parse_sql_value(token):
         except ValueError:
             pass
 
+    if re.fullmatch(r"-?\d+\.\d+", token):
+        try:
+            return float(token)
+        except ValueError:
+            pass
+
     return token
+
 
 def find_statement_end(content, start):
     """
@@ -85,6 +98,7 @@ def find_statement_end(content, start):
         i += 1
 
     return -1
+
 
 def extract_tuples(values_text):
     """
@@ -127,6 +141,7 @@ def extract_tuples(values_text):
         i += 1
 
     return tuples
+
 
 def split_tuple_fields(tuple_text):
     """
@@ -180,26 +195,16 @@ def split_tuple_fields(tuple_text):
     fields.append("".join(current).strip())
     return fields
 
-def extract_treatment_blocks(content):
-    """
-    Return a hierarchy:
-    [
-        {
-            "block_no": 1,
-            "rows": [ {...}, {...} ]
-        },
-        ...
-    ]
-    """
-    blocks = []
 
+def extract_table_rows(content, table_name, expected_columns):
     insert_re = re.compile(
-        r"INSERT INTO\s+`treatment`\s*\((.*?)\)\s*VALUES\s*",
+        rf"INSERT INTO\s+`{re.escape(table_name)}`\s*\((.*?)\)\s*VALUES\s*",
         re.IGNORECASE | re.DOTALL
     )
 
+    rows = []
     matches = list(insert_re.finditer(content))
-    print(f"Found {len(matches)} INSERT block(s) for treatment.")
+    print(f"Found {len(matches)} INSERT block(s) for {table_name}.")
 
     for block_no, m in enumerate(matches, start=1):
         columns_raw = m.group(1)
@@ -209,13 +214,13 @@ def extract_treatment_blocks(content):
         values_end = find_statement_end(content, values_start)
 
         if values_end == -1:
-            print(f"Warning: could not find end of INSERT block #{block_no}")
+            print(f"Warning: could not find end of INSERT block #{block_no} for {table_name}")
             continue
 
         values_text = content[values_start:values_end - 1]
         tuple_texts = extract_tuples(values_text)
 
-        block_rows = []
+        block_count = 0
 
         for tuple_text in tuple_texts:
             fields_raw = split_tuple_fields(tuple_text)
@@ -226,49 +231,45 @@ def extract_treatment_blocks(content):
 
             record = dict(zip(columns, fields))
 
-            for key in ("title", "description", "description_web", "description_api"):
-                if key in record and isinstance(record[key], str):
-                    record[key] = clean_text(record[key])
+            # Keep only expected columns if provided
+            if expected_columns:
+                record = {k: record.get(k) for k in expected_columns}
 
-            block_rows.append(record)
+            rows.append(record)
+            block_count += 1
 
-        blocks.append({
-            "block_no": block_no,
-            "rows": block_rows
-        })
+        print(f"  Block #{block_no}: {block_count} row(s)")
 
-        print(f"  Block #{block_no}: {len(block_rows)} row(s)")
+    return rows
 
-    return blocks
 
-def parse_mysql_treatment(sql_file_path):
+def parse_mysql_dump(sql_file_path):
     print(f"Reading: {sql_file_path}")
 
     with open(sql_file_path, "r", encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
-    treatment_blocks = extract_treatment_blocks(content)
+    data = {}
+    for table_name, expected_columns in TABLE_SCHEMAS.items():
+        data[table_name] = extract_table_rows(content, table_name, expected_columns)
 
-    return {
-        "treatment": treatment_blocks
-    }
+    return data
+
 
 if __name__ == "__main__":
-    sql_filename = "/Users/mahadi/Desktop/html_free_treatment/source_sql.sql"
-    output_json_path = "/Users/mahadi/Desktop/html_free_treatment/extracted_raw_data copy.json"
-
     try:
-        data = parse_mysql_treatment(sql_filename)
+        data = parse_mysql_dump(SQL_FILE_PATH)
 
-        total_rows = sum(len(block["rows"]) for block in data["treatment"])
+        total_rows = sum(len(rows) for rows in data.values())
         print("\n=== EXTRACTION SUMMARY ===")
-        print(f"Total INSERT blocks: {len(data['treatment'])}")
+        for table_name, rows in data.items():
+            print(f"{table_name}: {len(rows)} row(s)")
         print(f"Total rows extracted: {total_rows}")
 
-        with open(output_json_path, "w", encoding="utf-8") as out:
+        with open(OUTPUT_JSON_PATH, "w", encoding="utf-8") as out:
             json.dump(data, out, indent=4, ensure_ascii=False)
 
-        print(f"Saved to: {output_json_path}")
+        print(f"Saved to: {OUTPUT_JSON_PATH}")
 
     except FileNotFoundError:
-        print(f"ERROR: Could not find '{sql_filename}'.")
+        print(f"ERROR: Could not find '{SQL_FILE_PATH}'.")
